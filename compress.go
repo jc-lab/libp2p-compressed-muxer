@@ -3,7 +3,9 @@ package compressed_muxer
 import (
 	"io"
 	"net"
+	"sync"
 	"sync/atomic"
+	"time"
 )
 
 type CompressEncoder interface {
@@ -33,6 +35,13 @@ type compNetConn struct {
 	unCompRead  int64
 	netWrite    int64
 	unCompWrite int64
+
+	flushMutex  sync.Mutex
+	flushPeriod time.Duration
+	flushing    bool
+	flushTimer  *time.Timer
+	flushErr    error
+	closeCh     chan any
 }
 
 func (c *compNetConn) Read(b []byte) (int, error) {
@@ -42,12 +51,28 @@ func (c *compNetConn) Read(b []byte) (int, error) {
 }
 
 func (c *compNetConn) Write(b []byte) (int, error) {
+	c.flushMutex.Lock()
+	defer c.flushMutex.Unlock()
+
+	if c.flushErr != nil {
+		return 0, c.flushErr
+	}
+
 	n, err := c.encoder.Write(b)
 	atomic.AddInt64(&c.unCompWrite, int64(n))
 	if n > 0 {
-		c.encoder.Flush()
+		if !c.flushing {
+			c.flushing = true
+			c.flushTimer.Reset(c.flushPeriod)
+		}
 	}
 	return n, err
+}
+
+func (c *compNetConn) Close() error {
+	c.flushTimer.Stop()
+	close(c.closeCh)
+	return c.Conn.Close()
 }
 
 func (c *compNetConn) GetAll() (netRead int64, netWrite int64, unCompRead int64, unCompWrite int64) {
@@ -70,11 +95,31 @@ func (c *compNetConn) GetUnCompWrite() int64 {
 	return atomic.LoadInt64(&c.unCompWrite)
 }
 
+func (c *compNetConn) flushWorker() {
+	for {
+		select {
+		case _ = <-c.flushTimer.C:
+			c.doFlush()
+		case _, _ = <-c.closeCh:
+			return
+		}
+	}
+}
+
+func (c *compNetConn) doFlush() {
+	c.flushMutex.Lock()
+	defer c.flushMutex.Unlock()
+	c.flushing = false
+	c.flushErr = c.encoder.Flush()
+}
+
 func wrapConn(parent net.Conn, compressor CompressorFactory) (net.Conn, error) {
 	var err error
 
 	wrappedConn := &compNetConn{
-		Conn: parent,
+		Conn:        parent,
+		flushPeriod: time.Microsecond,
+		closeCh:     make(chan any),
 	}
 
 	wrappedConn.encoder, err = compressor.NewEncoder(&counterWriter{
@@ -91,6 +136,10 @@ func wrapConn(parent net.Conn, compressor CompressorFactory) (net.Conn, error) {
 	if err != nil {
 		return nil, err
 	}
+
+	wrappedConn.flushTimer = time.NewTimer(time.Second)
+	wrappedConn.flushTimer.Stop()
+	go wrappedConn.flushWorker()
 
 	return wrappedConn, nil
 }

@@ -18,7 +18,7 @@ func init() {
 type zstdCompressor struct{}
 
 func (z *zstdCompressor) NewEncoder(w io.Writer) (compressed_muxer.CompressEncoder, error) {
-	return zstd.NewWriter(w, zstd.WithEncoderLevel(zstd.SpeedFastest))
+	return zstd.NewWriter(w)
 }
 
 func (z *zstdCompressor) NewDecoder(r io.Reader) (io.Reader, error) {
