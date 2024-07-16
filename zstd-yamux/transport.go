@@ -7,7 +7,7 @@ import (
 	"io"
 )
 
-const ID = "/zstd-yamux/1.0.0"
+const ID = "/zstd/1.0.0/yamux/1.0.0"
 
 var DefaultTransport *compressed_muxer.Transport
 
